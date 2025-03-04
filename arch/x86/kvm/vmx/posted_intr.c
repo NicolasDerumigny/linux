@@ -223,7 +223,7 @@ void pi_wakeup_handler(void)
 	raw_spin_lock(spinlock);
 	list_for_each_entry(vmx, wakeup_list, pi_wakeup_list) {
 
-		if (pi_test_on(&vmx->pi_desc))
+		if (pi_test_on(vmx->pi_desc))
 			kvm_vcpu_wake_up(&vmx->vcpu);
 	}
 	raw_spin_unlock(spinlock);

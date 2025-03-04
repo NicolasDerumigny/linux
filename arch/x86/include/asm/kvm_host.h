@@ -1667,7 +1667,7 @@ struct kvm_x86_ops {
 	unsigned long (*vcpu_get_apicv_inhibit_reasons)(struct kvm_vcpu *vcpu);
 	int (*set_pvipi_addr)(struct kvm *kvm, unsigned long addr);
 };
-set_pvipi_addr = svm_set_pvipi_addr
+
 struct kvm_x86_nested_ops {
 	void (*leave_nested)(struct kvm_vcpu *vcpu);
 	bool (*is_exception_vmexit)(struct kvm_vcpu *vcpu, u8 vector,

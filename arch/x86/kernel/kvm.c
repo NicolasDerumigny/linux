@@ -43,7 +43,8 @@
 #include <asm/reboot.h>
 #include <asm/svm.h>
 #include <asm/e820/api.h>
-#include <asm/ipi.h>
+
+#include "apic/local.h"
 
 DEFINE_STATIC_KEY_FALSE(kvm_async_pf_enabled);
 
@@ -682,7 +683,7 @@ static void kvm_send_ipi(int cpu, int vector)
 	u32 vcpu_id = per_cpu(x86_cpu_to_apicid, cpu);
 	unsigned int nv, dest/* , val */;
 
-	x2apic_wrmsr_fence();
+	weak_wrmsr_fence();
 
 	WARN(vector == NMI_VECTOR, "try to deliver NMI");
 
@@ -1103,12 +1104,11 @@ static uint32_t __init kvm_detect(void)
 	return kvm_cpuid_base();
 }
 
-void __init kvm_pv_ipi_init(void)
+void kvm_pv_ipi_init(void)
 {
 	if (kvm_para_has_feature(KVM_FEATURE_PV_IPI) && x2apic_enabled())
 		kvm_setup_pv_ipi2();
 }
-EXPORT_SYMBOL_GPL(kvm_pv_ipi_init);
 
 
 static void __init kvm_apic_init(void)

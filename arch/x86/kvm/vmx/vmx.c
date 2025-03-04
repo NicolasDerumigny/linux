@@ -2065,8 +2065,7 @@ static int vmx_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 
 		/* Userspace (e.g., QEMU) initiated disabling PV IPI */
 		if (msr_info->host_initiated && !(data & KVM_PV_IPI_ENABLE)) {
-			vmx_enable_intercept_for_msr(vmx->vmcs01.msr_bitmap,
-						     X2APIC_MSR(APIC_ICR),
+			vmx_enable_intercept_for_msr(vcpu, X2APIC_MSR(APIC_ICR),
 						     MSR_TYPE_RW);
 			vcpu->arch.pvipi_enabled = false;
 			pr_debug("host-initiated disabling PV IPI on vcpu %d\n",
@@ -2078,8 +2077,8 @@ static int vmx_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 			break;
 
 		if (data & KVM_PV_IPI_ENABLE && !vcpu->arch.pvipi_enabled) {
-			vmx_disable_intercept_for_msr(vmx->vmcs01.msr_bitmap,
-					X2APIC_MSR(APIC_ICR), MSR_TYPE_RW);
+			vmx_disable_intercept_for_msr(vcpu, X2APIC_MSR(APIC_ICR), 
+					      MSR_TYPE_RW);
 			vcpu->arch.pvipi_enabled = true;
 			pr_emerg("enable pv ipi for vcpu %d\n", vcpu->vcpu_id);
 		}
@@ -4006,9 +4005,7 @@ static void vmx_update_msr_bitmap_x2apic(struct kvm_vcpu *vcpu)
 		vmx_enable_intercept_for_msr(vcpu, X2APIC_MSR(APIC_TMCCT), MSR_TYPE_RW);
 		vmx_disable_intercept_for_msr(vcpu, X2APIC_MSR(APIC_EOI), MSR_TYPE_W);
 		vmx_disable_intercept_for_msr(vcpu, X2APIC_MSR(APIC_SELF_IPI), MSR_TYPE_W);
-		vmx_set_intercept_for_msr(msr_bitmap,
-					  X2APIC_MSR(APIC_ICR),
-					  MSR_TYPE_RW,
+		vmx_set_intercept_for_msr(vcpu, X2APIC_MSR(APIC_ICR), MSR_TYPE_RW,
 					  !vcpu->arch.pvipi_enabled);
 
 		if (enable_ipiv)
@@ -4629,9 +4626,9 @@ static int pi_desc_setup(struct kvm_vcpu *vcpu)
 
 	/* pin pages in memory */
 	/* TODO: allow to move those page to support memory unplug.
-	 * See commtnes in kvm_vcpu_reload_apic_access_page for details.
+	 * See comments in kvm_vcpu_reload_apic_access_page for details.
 	 */
-	page = kvm_vcpu_gfn_to_page(vcpu, kvm_vmx->pvipi_gfn + page_index);
+	page = gfn_to_page(vcpu->kvm, kvm_vmx->pvipi_gfn + page_index);
 	if (is_error_page(page)) {
 		ret = -EFAULT;
 		goto out;
@@ -4783,11 +4780,11 @@ static void __vmx_vcpu_reset(struct kvm_vcpu *vcpu)
 	vmx->msr_ia32_feature_control_valid_bits = FEAT_CTL_LOCKED;
 
 	/*
-	 * Enforce invariant: pi_desc.nv is always either POSTED_INTR_VECTOR
+	 * Enforce invariant: pi_desc->nv is always either POSTED_INTR_VECTOR
 	 * or POSTED_INTR_WAKEUP_VECTOR.
 	 */
-	vmx->pi_desc.nv = POSTED_INTR_VECTOR;
-	vmx->pi_desc.sn = 1;
+	vmx->pi_desc->nv = POSTED_INTR_VECTOR;
+	vmx->pi_desc->sn = 1;
 }
 
 static void vmx_vcpu_reset(struct kvm_vcpu *vcpu, bool init_event)
@@ -5010,7 +5007,7 @@ static int vmx_interrupt_allowed(struct kvm_vcpu *vcpu, bool for_injection)
 
 static int vmx_set_pvipi_addr(struct kvm *kvm, unsigned long addr)
 {
-	int ret;
+	void __user *ret;
 
 	if (!enable_apicv || !x2apic_enabled())
 		return 0;
@@ -5020,15 +5017,15 @@ static int vmx_set_pvipi_addr(struct kvm *kvm, unsigned long addr)
 		return 0;
 	}
 
-	ret = x86_set_memory_region(kvm, PVIPI_PAGE_PRIVATE_MEMSLOT, addr,
+	ret = __x86_set_memory_region(kvm, PVIPI_PAGE_PRIVATE_MEMSLOT, addr,
 				    PAGE_SIZE * PI_DESC_PAGES);
-	if (ret)
-		return ret;
+	if (IS_ERR(ret))
+		return PTR_ERR(ret);
 
 	to_kvm_vmx(kvm)->pvipi_gfn = addr >> PAGE_SHIFT;
 	kvm_pvipi_init(kvm, to_kvm_vmx(kvm)->pvipi_gfn);
 
-	return ret;
+	return 0;
 
 }
 
@@ -7179,7 +7176,6 @@ static noinstr void vmx_vcpu_enter_exit(struct kvm_vcpu *vcpu,
 	guest_state_exit_irqoff();
 }
 
-static bool msr_write_intercepted(struct kvm_vcpu *vcpu, u32 msr);
 static fastpath_t vmx_vcpu_run(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
@@ -7370,18 +7366,19 @@ static int vmx_vcpu_create(struct kvm_vcpu *vcpu)
 
 	err = -ENOMEM;
 
+	vmx->vpid = allocate_vpid();
+
 	if (kvm_vcpu_apicv_active(&vmx->vcpu)) {
-		if (id > MAX_PI_DESC) {
-			pr_err("kvm: failed to alloc pi descriptor,
-					no enough pi descs left\n");
-			goto free_vcpu;
+		if (vcpu->vcpu_id > MAX_PI_DESC) {
+			pr_err("kvm: failed to alloc pi descriptor,"
+					"not enough pi descs left\n");
+			goto free_vpid;
 		}
 		err = pi_desc_setup(&vmx->vcpu);
 		if (err < 0)
-			goto free_vcpu;
+			goto free_vpid;
 	}
 
-	vmx->vpid = allocate_vpid();
 
 	/*
 	 * If PML is turned on, failure on enabling PML just results in failure

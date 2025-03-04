@@ -5974,7 +5974,7 @@ static int kvm_vm_ioctl_set_pvipi_addr(struct kvm *kvm, unsigned long addr)
 {
 	int ret;
 
-	ret = kvm_x86_ops->set_pvipi_addr(kvm, addr);
+	ret = kvm_x86_ops.set_pvipi_addr(kvm, addr);
 	return ret;
 }
 
@@ -6458,12 +6458,12 @@ static int kvm_add_msr_filter(struct kvm_x86_msr_filter *msr_filter,
 	return 0;
 }
 
-static int kvm_m_ioctl_set_msr_filter(struct kvm *kvm,
+static int kvm_vm_ioctl_set_msr_filter(struct kvm *kvm,
 			          struct kvm_msr_filter *filter)
 {
-	struct kvm_86_msr_filter *new_filter, *old_filter;
-	bool defaul_allow;
-	bool empty  true;
+	struct kvm_x86_msr_filter *new_filter, *old_filter;
+	bool default_allow;
+	bool empty = true;
 	int r = 0;
 	u32 i;
 

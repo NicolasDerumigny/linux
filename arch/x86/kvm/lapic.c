@@ -497,7 +497,6 @@ bool __kvm_apic_update_irr(u32 *pir, void *regs, int *max_irr)
 	u32 i, vec;
 	u32 pir_val, irr_val, prev_irr_val;
 	int max_updated_irr;
-	unsigned long *pir2 = (unsigned long *)pir;
 
 	max_updated_irr = -1;
 	*max_irr = -1;
