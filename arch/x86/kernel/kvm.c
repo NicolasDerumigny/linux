@@ -43,6 +43,7 @@
 #include <asm/reboot.h>
 #include <asm/svm.h>
 #include <asm/e820/api.h>
+#include <asm/ipi.h>
 
 DEFINE_STATIC_KEY_FALSE(kvm_async_pf_enabled);
 
@@ -626,7 +627,194 @@ static void kvm_setup_pv_ipi(void)
 {
 	apic->send_IPI_mask = kvm_send_ipi_mask;
 	apic->send_IPI_mask_allbutself = kvm_send_ipi_mask_allbutself;
-	pr_info("setup PV IPIs\n");
+	pr_info("setup old PV IPIs\n");
+}
+
+/* Posted-Interrupt Descriptor */
+struct pi_desc {
+	u32 pir[8];     /* Posted interrupt requested */
+	union {
+		struct {
+				/* bit 256 - Outstanding Notification */
+			u16     on      : 1,
+				/* bit 257 - Suppress Notification */
+			sn      : 1,
+				/* bit 271:258 - Reserved */
+			rsvd_1  : 14;
+				/* bit 279:272 - Notification Vector */
+			u8      nv;
+				/* bit 287:280 - Reserved */
+			u8      rsvd_2;
+				/* bit 319:288 - Notification Destination */
+			u32     ndst;
+		};
+		u64 control;
+	};
+	u32 rsvd[6];
+} __aligned(64);
+
+#define POSTED_INTR_ON  0
+#define POSTED_INTR_SN  1
+
+static inline bool pi_test_and_set_on(struct pi_desc *pi_desc)
+{
+	return test_and_set_bit(POSTED_INTR_ON,
+			(unsigned long *)&pi_desc->control);
+}
+
+static inline int pi_test_and_set_pir(int vector, struct pi_desc *pi_desc)
+{
+	return test_and_set_bit(vector, (unsigned long *)pi_desc->pir);
+}
+
+static struct pi_desc *pi_desc_page;
+
+static void x2apic_send_IPI_dest(unsigned int apicid, int vector, unsigned int dest)
+{
+	unsigned long cfg = __prepare_ICR(0, vector, dest);
+
+	native_x2apic_icr_write(cfg, apicid);
+}
+
+static void kvm_send_ipi(int cpu, int vector)
+{
+	/* In x2apic mode, apicid is equal to vcpu id.*/
+	u32 vcpu_id = per_cpu(x86_cpu_to_apicid, cpu);
+	unsigned int nv, dest/* , val */;
+
+	x2apic_wrmsr_fence();
+
+	WARN(vector == NMI_VECTOR, "try to deliver NMI");
+
+	/* TODO: rollback to old approach. */
+	if (vcpu_id >= MAX_PI_DESC)
+		return;
+
+	if (pi_test_and_set_pir(vector, &pi_desc_page[vcpu_id]))
+		return;
+
+	if (pi_test_and_set_on(&pi_desc_page[vcpu_id]))
+		return;
+
+	nv = pi_desc_page[vcpu_id].nv;
+	dest = pi_desc_page[vcpu_id].ndst;
+
+	x2apic_send_IPI_dest(dest, nv, APIC_DEST_PHYSICAL);
+
+}
+
+static void __kvm_send_ipi_mask(const struct cpumask *mask, int vector,
+				int apic_dest)
+{
+	unsigned long query_cpu;
+	unsigned long this_cpu;
+	unsigned long flags;
+
+	local_irq_save(flags);
+
+	this_cpu = smp_processor_id();
+	for_each_cpu(query_cpu, mask) {
+		if (apic_dest == APIC_DEST_ALLBUT && this_cpu == query_cpu)
+			continue;
+		kvm_send_ipi(query_cpu, vector);
+	}
+
+	local_irq_restore(flags);
+}
+
+static void kvm_send_ipi_mask2(const struct cpumask *mask, int vector)
+{
+	__kvm_send_ipi_mask(mask, vector, APIC_DEST_ALLINC);
+}
+
+static void kvm_send_ipi_mask_allbutself2(const struct cpumask *mask, int vector)
+{
+	__kvm_send_ipi_mask(mask, vector, APIC_DEST_ALLBUT);
+}
+
+static void kvm_send_ipi_allbutself2(int vector)
+{
+	__kvm_send_ipi_mask(cpu_online_mask, vector, APIC_DEST_ALLBUT);
+}
+
+static void kvm_send_ipi_all2(int vector)
+{
+	__kvm_send_ipi_mask(cpu_online_mask, vector, APIC_DEST_ALLINC);
+}
+
+static inline void kvm_icr_write(u32 low, u32 id)
+{
+	wrmsrl(MSR_KVM_PV_ICR, ((__u64) id) << 32 | low);
+}
+
+static inline u64 kvm_icr_read(void)
+{
+	unsigned long val;
+
+	rdmsrl(MSR_KVM_PV_ICR, val);
+	return val;
+}
+
+static int kvm_setup_pv_ipi2(void)
+{
+	union pvipi_msr msr;
+
+	rdmsrl(MSR_KVM_PV_IPI, msr.msr_val);
+
+	if (msr.valid != 1)
+		return -EINVAL;
+
+	if (msr.enable) {
+		/* set enable bit and read back. */
+		wrmsrl(MSR_KVM_PV_IPI, msr.msr_val | KVM_PV_IPI_ENABLE);
+
+		rdmsrl(MSR_KVM_PV_IPI, msr.msr_val);
+
+		if (!(msr.msr_val & KVM_PV_IPI_ENABLE)) {
+			pr_emerg("pv ipi enable failed\n");
+			iounmap(pi_desc_page);
+			return -EINVAL;
+		}
+
+		goto out;
+	} else {
+
+		pi_desc_page = ioremap_cache(msr.addr << PAGE_SHIFT,
+				PAGE_SIZE << msr.count);
+
+		if (!pi_desc_page)
+			return -ENOMEM;
+
+
+		pr_emerg("pv ipi msr val %lx, pi_desc_page %lx, %lx\n",
+				(unsigned long)msr.msr_val,
+				(unsigned long)pi_desc_page,
+				(unsigned long)&pi_desc_page[1]);
+
+		/* set enable bit and read back. */
+		wrmsrl(MSR_KVM_PV_IPI, msr.msr_val | KVM_PV_IPI_ENABLE);
+
+		rdmsrl(MSR_KVM_PV_IPI, msr.msr_val);
+
+		if (!(msr.msr_val & KVM_PV_IPI_ENABLE)) {
+			pr_emerg("pv ipi enable failed\n");
+			iounmap(pi_desc_page);
+			return -EINVAL;
+		}
+		apic->send_IPI = kvm_send_ipi;
+		apic->send_IPI_mask = kvm_send_ipi_mask2;
+		apic->send_IPI_mask_allbutself = kvm_send_ipi_mask_allbutself2;
+		apic->send_IPI_allbutself = kvm_send_ipi_allbutself2;
+		apic->send_IPI_all = kvm_send_ipi_all2;
+		apic->icr_read = kvm_icr_read;
+		apic->icr_write = kvm_icr_write;
+		pr_emerg("pv ipi enabled\n");
+	}
+out:
+	pr_emerg("pv ipi KVM setup real PV IPIs for cpu %d\n",
+			smp_processor_id());
+
+	return 0;
 }
 
 static void kvm_smp_send_call_func_ipi(const struct cpumask *mask)
@@ -914,6 +1102,14 @@ static uint32_t __init kvm_detect(void)
 {
 	return kvm_cpuid_base();
 }
+
+void __init kvm_pv_ipi_init(void)
+{
+	if (kvm_para_has_feature(KVM_FEATURE_PV_IPI) && x2apic_enabled())
+		kvm_setup_pv_ipi2();
+}
+EXPORT_SYMBOL_GPL(kvm_pv_ipi_init);
+
 
 static void __init kvm_apic_init(void)
 {

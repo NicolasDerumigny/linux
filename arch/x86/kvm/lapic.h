@@ -22,6 +22,8 @@
 #define APIC_BROADCAST			0xFF
 #define X2APIC_BROADCAST		0xFFFFFFFFul
 
+#define X2APIC_MSR(r) (APIC_BASE_MSR + ((r) >> 4))
+
 enum lapic_mode {
 	LAPIC_MODE_DISABLED = 0,
 	LAPIC_MODE_INVALID = X2APIC_ENABLE,
@@ -219,6 +221,11 @@ static inline int apic_x2apic_mode(struct kvm_lapic *apic)
 	return apic->vcpu->arch.apic_base & X2APIC_ENABLE;
 }
 
+static inline int kvm_x2apic_mode(struct kvm_vcpu *vcpu)
+{
+	return apic_x2apic_mode(vcpu->arch.apic);
+}
+
 static inline bool kvm_vcpu_apicv_active(struct kvm_vcpu *vcpu)
 {
 	return lapic_in_kernel(vcpu) && vcpu->arch.apic->apicv_active;
@@ -273,5 +280,7 @@ static inline u8 kvm_xapic_id(struct kvm_lapic *apic)
 {
 	return kvm_lapic_get_reg(apic, APIC_ID) >> 24;
 }
+
+void kvm_pvipi_init(struct kvm *kvm, u64 pi_desc_gfn);
 
 #endif

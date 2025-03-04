@@ -886,6 +886,20 @@ struct kvm_vcpu_arch {
 		struct gfn_to_hva_cache data;
 	} pv_eoi;
 
+	/* Definition for msr pv ipi:
+	 *	Bit 0: pi_desc valid bit.
+	 *	       Indicate hypervisor has prepared pi_desc address.
+	 *	Bit 1: pv_ipi enable bit.
+	 *	       Guest set 1 to indicate pv_ipi is enabled in guest.
+	 *	       Guest read this bit(1) to get whether hypervisor has
+	 *	       enabled pv_ipi(don’t intercept 0x830).
+	 *	Bit 8-11: count of pages for struct pi_desc takes.
+	 *	Bit 12-63: base address of pi_desc in gpa.
+	 */
+	struct {
+		u64 msr_val;
+	} pv_ipi;
+
 	u64 msr_kvm_poll_control;
 
 	/*
@@ -921,6 +935,9 @@ struct kvm_vcpu_arch {
 
 	/* Flush the L1 Data cache for L1TF mitigation on VMENTER */
 	bool l1tf_flush_l1d;
+
+	/* Indicate whether PV IPI is enabled on this vcpu */
+	bool pvipi_enabled;
 
 	/* Host CPU on which VM-entry was most recently attempted */
 	int last_vmentry_cpu;
@@ -1247,6 +1264,12 @@ struct kvm_arch {
 
 	bool guest_can_read_msr_platform_info;
 	bool exception_payload_enabled;
+
+	/*
+	 * `pvipi.enable` is a per-vcpu bit, which is saved in
+	 * `struct  kvm_vcpu_arch` rather than here.
+	 */
+	union pvipi_msr pvipi;
 
 	bool triple_fault_event;
 
@@ -1642,8 +1665,9 @@ struct kvm_x86_ops {
 	 * Returns vCPU specific APICv inhibit reasons
 	 */
 	unsigned long (*vcpu_get_apicv_inhibit_reasons)(struct kvm_vcpu *vcpu);
+	int (*set_pvipi_addr)(struct kvm *kvm, unsigned long addr);
 };
-
+set_pvipi_addr = svm_set_pvipi_addr
 struct kvm_x86_nested_ops {
 	void (*leave_nested)(struct kvm_vcpu *vcpu);
 	bool (*is_exception_vmexit)(struct kvm_vcpu *vcpu, u8 vector,

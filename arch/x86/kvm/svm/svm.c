@@ -4680,6 +4680,11 @@ static int svm_vm_init(struct kvm *kvm)
 	return 0;
 }
 
+static int svm_set_pvipi_addr(struct kvm *kvm, unsigned long addr)
+{
+	return 0;
+}
+
 static struct kvm_x86_ops svm_x86_ops __initdata = {
 	.name = "kvm_amd",
 
@@ -4804,6 +4809,7 @@ static struct kvm_x86_ops svm_x86_ops __initdata = {
 
 	.vcpu_deliver_sipi_vector = svm_vcpu_deliver_sipi_vector,
 	.vcpu_get_apicv_inhibit_reasons = avic_vcpu_get_apicv_inhibit_reasons,
+	.set_pvipi_addr = svm_set_pvipi_addr,
 };
 
 /*

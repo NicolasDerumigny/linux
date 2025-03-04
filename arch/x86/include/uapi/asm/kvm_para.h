@@ -36,6 +36,8 @@
 #define KVM_FEATURE_MSI_EXT_DEST_ID	15
 #define KVM_FEATURE_HC_MAP_GPA_RANGE	16
 #define KVM_FEATURE_MIGRATION_CONTROL	17
+#define KVM_FEATURE_PV_IPI	18
+
 
 #define KVM_HINTS_REALTIME      0
 
@@ -58,6 +60,8 @@
 #define MSR_KVM_ASYNC_PF_INT	0x4b564d06
 #define MSR_KVM_ASYNC_PF_ACK	0x4b564d07
 #define MSR_KVM_MIGRATION_CONTROL	0x4b564d08
+#define MSR_KVM_PV_IPI      0x4b564d09
+#define MSR_KVM_PV_ICR      0x4b564d0a
 
 struct kvm_steal_time {
 	__u64 steal;
@@ -149,5 +153,29 @@ struct kvm_vcpu_pv_apf_data {
 #define KVM_PV_EOI_MASK (0x1 << KVM_PV_EOI_BIT)
 #define KVM_PV_EOI_ENABLED KVM_PV_EOI_MASK
 #define KVM_PV_EOI_DISABLED 0x0
+
+union pvipi_msr {
+    __u64 msr_val;
+	struct {
+		__u64 enable:1;
+		__u64 reserved:7;
+		__u64 count:4;
+		__u64 addr:51;
+		__u64 valid:1;
+	};
+};
+
+#define KVM_PV_IPI_ENABLE 0x1UL
+#define KVM_PV_IPI_ADDR_SHIFT 12
+/*
+ * To avoild waste memory, only uses two pages as descriptor page which means
+ * only support 128 pi descriptors(64 bytes per descriptor) now.
+ */
+#define PI_DESC_PAGES 2
+#define PI_DESC_SIZE 64
+#define PI_DESC_PER_PAGE (PAGE_SIZE / PI_DESC_SIZE)
+#define MAX_PI_DESC (PI_DESC_PAGES * PI_DESC_PER_PAGE)
+
+
 
 #endif /* _UAPI_ASM_X86_KVM_PARA_H */

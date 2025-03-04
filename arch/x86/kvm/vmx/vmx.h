@@ -330,7 +330,7 @@ struct vcpu_vmx {
 	union vmx_exit_reason exit_reason;
 
 	/* Posted interrupt descriptor */
-	struct pi_desc pi_desc;
+	struct pi_desc *pi_desc;
 
 	/* Used if this vCPU is waiting for PI notification wakeup. */
 	struct list_head pi_wakeup_list;
@@ -384,6 +384,8 @@ struct kvm_vmx {
 	gpa_t ept_identity_map_addr;
 	/* Posted Interrupt Descriptor (PID) table for IPI virtualization */
 	u64 *pid_table;
+
+	unsigned long pvipi_gfn;
 };
 
 bool nested_vmx_allowed(struct kvm_vcpu *vcpu);

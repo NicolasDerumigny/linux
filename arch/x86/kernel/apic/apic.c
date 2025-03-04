@@ -1735,6 +1735,7 @@ static void end_local_APIC_setup(void)
 #endif
 
 	apic_pm_activate();
+	kvm_pv_ipi_init();
 }
 
 /*

@@ -1882,6 +1882,11 @@ static int vmx_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 #endif
 	case MSR_EFER:
 		return kvm_get_msr_common(vcpu, msr_info);
+	case MSR_KVM_PV_IPI:
+		msr_info->data =
+			(vcpu->kvm->arch.pvipi.msr_val & ~(u64)0x1) |
+			vcpu->arch.pvipi_enabled;
+		break;
 	case MSR_IA32_TSX_CTRL:
 		if (!msr_info->host_initiated &&
 		    !(vcpu->arch.arch_capabilities & ARCH_CAP_TSX_CTRL_MSR))
@@ -2054,6 +2059,32 @@ static int vmx_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 	case MSR_EFER:
 		ret = kvm_set_msr_common(vcpu, msr_info);
 		break;
+	case MSR_KVM_PV_IPI:
+		if (!vcpu->kvm->arch.pvipi.valid)
+			break;
+
+		/* Userspace (e.g., QEMU) initiated disabling PV IPI */
+		if (msr_info->host_initiated && !(data & KVM_PV_IPI_ENABLE)) {
+			vmx_enable_intercept_for_msr(vmx->vmcs01.msr_bitmap,
+						     X2APIC_MSR(APIC_ICR),
+						     MSR_TYPE_RW);
+			vcpu->arch.pvipi_enabled = false;
+			pr_debug("host-initiated disabling PV IPI on vcpu %d\n",
+			       vcpu->vcpu_id);
+			break;
+		}
+
+		if (!kvm_x2apic_mode(vcpu))
+			break;
+
+		if (data & KVM_PV_IPI_ENABLE && !vcpu->arch.pvipi_enabled) {
+			vmx_disable_intercept_for_msr(vmx->vmcs01.msr_bitmap,
+					X2APIC_MSR(APIC_ICR), MSR_TYPE_RW);
+			vcpu->arch.pvipi_enabled = true;
+			pr_emerg("enable pv ipi for vcpu %d\n", vcpu->vcpu_id);
+		}
+		break;
+
 #ifdef CONFIG_X86_64
 	case MSR_FS_BASE:
 		vmx_segment_cache_clear(vmx);
@@ -3975,6 +4006,11 @@ static void vmx_update_msr_bitmap_x2apic(struct kvm_vcpu *vcpu)
 		vmx_enable_intercept_for_msr(vcpu, X2APIC_MSR(APIC_TMCCT), MSR_TYPE_RW);
 		vmx_disable_intercept_for_msr(vcpu, X2APIC_MSR(APIC_EOI), MSR_TYPE_W);
 		vmx_disable_intercept_for_msr(vcpu, X2APIC_MSR(APIC_SELF_IPI), MSR_TYPE_W);
+		vmx_set_intercept_for_msr(msr_bitmap,
+					  X2APIC_MSR(APIC_ICR),
+					  MSR_TYPE_RW,
+					  !vcpu->arch.pvipi_enabled);
+
 		if (enable_ipiv)
 			vmx_disable_intercept_for_msr(vcpu, X2APIC_MSR(APIC_ICR), MSR_TYPE_RW);
 	}
@@ -4140,11 +4176,11 @@ static int vmx_deliver_posted_interrupt(struct kvm_vcpu *vcpu, int vector)
 	if (!vcpu->arch.apic->apicv_active)
 		return -1;
 
-	if (pi_test_and_set_pir(vector, &vmx->pi_desc))
+	if (pi_test_and_set_pir(vector, vmx->pi_desc))
 		return 0;
 
 	/* If a previous notification has sent the IPI, nothing to do.  */
-	if (pi_test_and_set_on(&vmx->pi_desc))
+	if (pi_test_and_set_on(vmx->pi_desc))
 		return 0;
 
 	/*
@@ -4583,6 +4619,30 @@ static int vmx_vcpu_precreate(struct kvm *kvm)
 	return vmx_alloc_ipiv_pid_table(kvm);
 }
 
+static int pi_desc_setup(struct kvm_vcpu *vcpu)
+{
+	struct kvm_vmx *kvm_vmx = to_kvm_vmx(vcpu->kvm);
+	struct page *page;
+	int page_index, ret = 0;
+
+	page_index = vcpu->vcpu_id / PI_DESC_PER_PAGE;
+
+	/* pin pages in memory */
+	/* TODO: allow to move those page to support memory unplug.
+	 * See commtnes in kvm_vcpu_reload_apic_access_page for details.
+	 */
+	page = kvm_vcpu_gfn_to_page(vcpu, kvm_vmx->pvipi_gfn + page_index);
+	if (is_error_page(page)) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	to_vmx(vcpu)->pi_desc = page_address(page)
+		+ vcpu->vcpu_id * PI_DESC_SIZE;
+out:
+	return ret;
+}
+
 #define VMX_XSS_EXIT_BITMAP 0
 
 static void init_vmcs(struct vcpu_vmx *vmx)
@@ -4618,7 +4678,7 @@ static void init_vmcs(struct vcpu_vmx *vmx)
 		vmcs_write16(GUEST_INTR_STATUS, 0);
 
 		vmcs_write16(POSTED_INTR_NV, POSTED_INTR_VECTOR);
-		vmcs_write64(POSTED_INTR_DESC_ADDR, __pa((&vmx->pi_desc)));
+		vmcs_write64(POSTED_INTR_DESC_ADDR, __pa((vmx->pi_desc)));
 	}
 
 	if (vmx_can_use_ipiv(&vmx->vcpu)) {
@@ -4946,6 +5006,30 @@ static int vmx_interrupt_allowed(struct kvm_vcpu *vcpu, bool for_injection)
 		return -EBUSY;
 
 	return !vmx_interrupt_blocked(vcpu);
+}
+
+static int vmx_set_pvipi_addr(struct kvm *kvm, unsigned long addr)
+{
+	int ret;
+
+	if (!enable_apicv || !x2apic_enabled())
+		return 0;
+
+	if (!IS_ALIGNED(addr, PAGE_SIZE)) {
+		pr_err("addr is not aligned\n");
+		return 0;
+	}
+
+	ret = x86_set_memory_region(kvm, PVIPI_PAGE_PRIVATE_MEMSLOT, addr,
+				    PAGE_SIZE * PI_DESC_PAGES);
+	if (ret)
+		return ret;
+
+	to_kvm_vmx(kvm)->pvipi_gfn = addr >> PAGE_SHIFT;
+	kvm_pvipi_init(kvm, to_kvm_vmx(kvm)->pvipi_gfn);
+
+	return ret;
+
 }
 
 static int vmx_set_tss_addr(struct kvm *kvm, unsigned int addr)
@@ -6702,15 +6786,15 @@ static int vmx_sync_pir_to_irr(struct kvm_vcpu *vcpu)
 	if (KVM_BUG_ON(!enable_apicv, vcpu->kvm))
 		return -EIO;
 
-	if (pi_test_on(&vmx->pi_desc)) {
-		pi_clear_on(&vmx->pi_desc);
+	if (pi_test_on(vmx->pi_desc)) {
+		pi_clear_on(vmx->pi_desc);
 		/*
 		 * IOMMU can write to PID.ON, so the barrier matters even on UP.
 		 * But on x86 this is just a compiler barrier anyway.
 		 */
 		smp_mb__after_atomic();
 		got_posted_interrupt =
-			kvm_apic_update_irr(vcpu, vmx->pi_desc.pir, &max_irr);
+			kvm_apic_update_irr(vcpu, vmx->pi_desc->pir, &max_irr);
 	} else {
 		max_irr = kvm_lapic_find_highest_irr(vcpu);
 		got_posted_interrupt = false;
@@ -6754,8 +6838,8 @@ static void vmx_apicv_post_state_restore(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 
-	pi_clear_on(&vmx->pi_desc);
-	memset(vmx->pi_desc.pir, 0, sizeof(vmx->pi_desc.pir));
+	pi_clear_on(vmx->pi_desc);
+	memset(vmx->pi_desc->pir, 0, sizeof(vmx->pi_desc->pir));
 }
 
 void vmx_do_interrupt_nmi_irqoff(unsigned long entry);
@@ -7095,6 +7179,7 @@ static noinstr void vmx_vcpu_enter_exit(struct kvm_vcpu *vcpu,
 	guest_state_exit_irqoff();
 }
 
+static bool msr_write_intercepted(struct kvm_vcpu *vcpu, u32 msr);
 static fastpath_t vmx_vcpu_run(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
@@ -7285,6 +7370,17 @@ static int vmx_vcpu_create(struct kvm_vcpu *vcpu)
 
 	err = -ENOMEM;
 
+	if (kvm_vcpu_apicv_active(&vmx->vcpu)) {
+		if (id > MAX_PI_DESC) {
+			pr_err("kvm: failed to alloc pi descriptor,
+					no enough pi descs left\n");
+			goto free_vcpu;
+		}
+		err = pi_desc_setup(&vmx->vcpu);
+		if (err < 0)
+			goto free_vcpu;
+	}
+
 	vmx->vpid = allocate_vpid();
 
 	/*
@@ -7365,7 +7461,7 @@ static int vmx_vcpu_create(struct kvm_vcpu *vcpu)
 
 	if (vmx_can_use_ipiv(vcpu))
 		WRITE_ONCE(to_kvm_vmx(vcpu->kvm)->pid_table[vcpu->vcpu_id],
-			   __pa(&vmx->pi_desc) | PID_TABLE_ENTRY_VALID);
+			   __pa(vmx->pi_desc) | PID_TABLE_ENTRY_VALID);
 
 	return 0;
 
@@ -8140,6 +8236,7 @@ static struct kvm_x86_ops vmx_x86_ops __initdata = {
 	.complete_emulated_msr = kvm_complete_insn_gp,
 
 	.vcpu_deliver_sipi_vector = kvm_vcpu_deliver_sipi_vector,
+	.set_pvipi_addr = vmx_set_pvipi_addr,
 };
 
 static unsigned int vmx_handle_intel_pt_intr(void)

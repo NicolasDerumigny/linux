@@ -1494,6 +1494,8 @@ static const u32 emulated_msrs_all[] = {
 
 	MSR_KVM_ASYNC_PF_EN, MSR_KVM_STEAL_TIME,
 	MSR_KVM_PV_EOI_EN, MSR_KVM_ASYNC_PF_INT, MSR_KVM_ASYNC_PF_ACK,
+	MSR_KVM_PV_IPI,
+	MSR_KVM_PV_ICR,
 
 	MSR_IA32_TSC_ADJUST,
 	MSR_IA32_TSC_DEADLINE,
@@ -3608,6 +3610,8 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 		return kvm_mtrr_set_msr(vcpu, msr, data);
 	case MSR_IA32_APICBASE:
 		return kvm_set_apic_base(vcpu, msr_info);
+	case MSR_KVM_PV_ICR:
+		return kvm_x2apic_msr_write(vcpu, X2APIC_MSR(APIC_ICR), data);
 	case APIC_BASE_MSR ... APIC_BASE_MSR + 0xff:
 		return kvm_x2apic_msr_write(vcpu, msr, data);
 	case MSR_IA32_TSC_DEADLINE:
@@ -4055,6 +4059,9 @@ int kvm_get_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 	case MSR_IA32_APICBASE:
 		msr_info->data = kvm_get_apic_base(vcpu);
 		break;
+	case MSR_KVM_PV_ICR:
+		return kvm_x2apic_msr_read(vcpu,
+				X2APIC_MSR(APIC_ICR), &msr_info->data);
 	case APIC_BASE_MSR ... APIC_BASE_MSR + 0xff:
 		return kvm_x2apic_msr_read(vcpu, msr_info->index, &msr_info->data);
 	case MSR_IA32_TSC_DEADLINE:
@@ -5963,6 +5970,14 @@ vm_fault_t kvm_arch_vcpu_fault(struct kvm_vcpu *vcpu, struct vm_fault *vmf)
 	return VM_FAULT_SIGBUS;
 }
 
+static int kvm_vm_ioctl_set_pvipi_addr(struct kvm *kvm, unsigned long addr)
+{
+	int ret;
+
+	ret = kvm_x86_ops->set_pvipi_addr(kvm, addr);
+	return ret;
+}
+
 static int kvm_vm_ioctl_set_tss_addr(struct kvm *kvm, unsigned long addr)
 {
 	int ret;
@@ -6443,12 +6458,12 @@ static int kvm_add_msr_filter(struct kvm_x86_msr_filter *msr_filter,
 	return 0;
 }
 
-static int kvm_vm_ioctl_set_msr_filter(struct kvm *kvm,
-				       struct kvm_msr_filter *filter)
+static int kvm_m_ioctl_set_msr_filter(struct kvm *kvm,
+			          struct kvm_msr_filter *filter)
 {
-	struct kvm_x86_msr_filter *new_filter, *old_filter;
-	bool default_allow;
-	bool empty = true;
+	struct kvm_86_msr_filter *new_filter, *old_filter;
+	bool defaul_allow;
+	bool empty  true;
 	int r = 0;
 	u32 i;
 
@@ -6978,6 +6993,9 @@ set_pit2_out:
 		r = kvm_vm_ioctl_set_msr_filter(kvm, &filter);
 		break;
 	}
+	case KVM_SET_PVIPI_ADDR:
+		r = kvm_vm_ioctl_set_pvipi_addr(kvm, arg);
+		break;
 	default:
 		r = -ENOTTY;
 	}
@@ -12552,6 +12570,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 		__x86_set_memory_region(kvm, IDENTITY_PAGETABLE_PRIVATE_MEMSLOT,
 					0, 0);
 		__x86_set_memory_region(kvm, TSS_PRIVATE_MEMSLOT, 0, 0);
+		__x86_set_memory_region(kvm, PVIPI_PAGE_PRIVATE_MEMSLOT, 0, 0);
 		mutex_unlock(&kvm->slots_lock);
 	}
 	kvm_unload_vcpu_mmus(kvm);

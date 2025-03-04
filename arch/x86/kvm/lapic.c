@@ -497,6 +497,7 @@ bool __kvm_apic_update_irr(u32 *pir, void *regs, int *max_irr)
 	u32 i, vec;
 	u32 pir_val, irr_val, prev_irr_val;
 	int max_updated_irr;
+	unsigned long *pir2 = (unsigned long *)pir;
 
 	max_updated_irr = -1;
 	*max_irr = -1;
@@ -3019,6 +3020,16 @@ int kvm_lapic_set_pv_eoi(struct kvm_vcpu *vcpu, u64 data, unsigned long len)
 
 	return 0;
 }
+
+void kvm_pvipi_init(struct kvm *kvm, u64 pi_desc_gfn)
+{
+	kvm->arch.pvipi.addr = pi_desc_gfn;
+	kvm->arch.pvipi.count = PI_DESC_PAGES;
+	/* make sure addr and count is visible before set valid bit */
+	smp_wmb();
+	kvm->arch.pvipi.valid = 1;
+}
+EXPORT_SYMBOL_GPL(kvm_pvipi_init);
 
 int kvm_apic_accept_events(struct kvm_vcpu *vcpu)
 {

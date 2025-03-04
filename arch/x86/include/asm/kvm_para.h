@@ -127,6 +127,7 @@ void kvm_async_pf_task_wait_schedule(u32 token);
 void kvm_async_pf_task_wake(u32 token);
 u32 kvm_read_and_reset_apf_flags(void);
 bool __kvm_handle_async_pf(struct pt_regs *regs, u32 token);
+void kvm_pv_ipi_init(void);
 
 DECLARE_STATIC_KEY_FALSE(kvm_async_pf_enabled);
 
@@ -142,6 +143,9 @@ static __always_inline bool kvm_handle_async_pf(struct pt_regs *regs, u32 token)
 void __init kvm_spinlock_init(void);
 #else /* !CONFIG_PARAVIRT_SPINLOCKS */
 static inline void kvm_spinlock_init(void)
+{
+}
+static void kvm_pv_ipi_init(void)
 {
 }
 #endif /* CONFIG_PARAVIRT_SPINLOCKS */
